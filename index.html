@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Horizon App</title>
+  </head>
+  <body>
+    <!--
+      This app is a Module Federation *remote*: the Horizon host loads its
+      remoteEntry.js and renders the routes/extensions it registers. There is no
+      standalone mount, so opening the deployed page directly shows a blank
+      screen — that is expected. No entry <script> is hard-coded here; webpack's
+      HtmlWebpackPlugin injects the generated bundles.
+    -->
+    <div id="root"></div>
+  </body>
+</html>
