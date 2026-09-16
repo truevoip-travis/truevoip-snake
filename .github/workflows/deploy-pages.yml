@@ -1,0 +1,112 @@
+name: Deploy to GitHub Pages
+
+# Builds the Module Federation remote and publishes dist/ to GitHub Pages, which
+# serves it as a CDN for the Horizon host:
+#   https://<your-github-user>.github.io/<repo>/remoteEntry.js
+# Pages sends `Access-Control-Allow-Origin: *`, so the host can load it
+# cross-origin. The page renders nothing on its own — it is a headless remote.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; never cancel a publish that is already running.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # The same checks the NetSapiens platform runs on a submitted bundle.
+      # Failing here is far easier to debug than failing there.
+      - name: Verify bundle
+        run: npm run verify
+
+      # Lets the guard below (and you) see which version is live on the CDN.
+      - name: Stamp version
+        run: node -p "require('./package.json').version" > dist/version.txt
+
+      # ── Why this guard exists ────────────────────────────────────────────
+      # The remote entry URL never changes, so the version is the ONLY signal
+      # that tells Horizon to re-verify the bytes at that URL. The platform
+      # pins a hash of the bytes it verified. Publish new bytes under a version
+      # it already verified and it keeps enforcing the OLD hash against the new
+      # ones: every host fails its integrity check and your app silently stops
+      # appearing, with no error in the portal explaining why.
+      #
+      # This compares against what is actually LIVE on your Pages site rather
+      # than against the previous commit, so it only fires when it is really a
+      # problem — and never because you split your edits across two commits.
+      - name: Refuse to publish changed bytes under a live version
+        run: |
+          BASE="https://${GITHUB_REPOSITORY%%/*}.github.io/${GITHUB_REPOSITORY#*/}"
+          THIS=$(node -p "require('./package.json').version")
+          LIVE=$(curl -fsS --max-time 20 "$BASE/version.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+
+          if [ -z "$LIVE" ]; then
+            echo "Nothing published yet (or no version.txt) — first deploy, nothing to compare."
+            exit 0
+          fi
+          if [ "$LIVE" != "$THIS" ]; then
+            echo "Live is $LIVE, publishing $THIS. Version moved — good."
+            exit 0
+          fi
+          if curl -fsS --max-time 20 "$BASE/remoteEntry.js" -o /tmp/live-entry.js 2>/dev/null \
+             && cmp -s /tmp/live-entry.js dist/remoteEntry.js; then
+            echo "Version $THIS is already live and the bundle is unchanged — nothing to re-verify."
+            exit 0
+          fi
+
+          echo "::error::Version $THIS is already live but the bundle changed. Bump \"version\" in package.json (e.g. $THIS -> next patch) and push again, or the portal will keep enforcing the old bundle's hash and your app will silently stop loading."
+          exit 1
+
+      # Stop GitHub's Jekyll layer from stripping webpack's _-prefixed files.
+      - name: Disable Jekyll
+        run: touch dist/.nojekyll
+
+      - name: Report version
+        run: |
+          V=$(node -p "require('./package.json').version")
+          {
+            echo "### Deployed version \`$V\`"
+            echo ""
+            echo "Now **redeploy the app in Registered Apps** in the portal, then hard-refresh (Ctrl+Shift+R). Pushing to GitHub alone does not update the running portal."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
